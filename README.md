@@ -14,7 +14,6 @@
 By the end of this lab, you will be able to:
 - Implement Design for Testability (DFT)
 - Perform Logic Equivalence Check (LEC)
-- Estimate power consumption
 
 ---
 
@@ -223,5 +222,5 @@ If the designs are functionally equivalent, the tool will report "PASS":
 > Now, introduce an error in the structural Verilog netlist and repeat the LEC. You will observe that the check does not pass.
 
 
-### Task 3 – Power Estimation
+
 
