@@ -3,9 +3,9 @@
 
 #### ELEC70142 Digital VLSI Design
 
-### Lab 5 – Scan Chain Insertion, Logic Equivalence Check, and Power Estimation
+### Lab 5 – Scan Chain Insertion, ATPG and Logic Equivalence Check
 
-##### *Peter Cheung, v1.2 – 13 November 2025*
+##### *Peter Cheung, v2.0 – 4 September 2026*
 
 ---
 
@@ -13,214 +13,218 @@
 
 By the end of this lab, you will be able to:
 - Implement Design for Testability (DFT)
+- Generate test patterns with an ATPG tool
 - Perform Logic Equivalence Check (LEC)
 
 ---
 
+
 ### Task 1 – Scan Chain Insertion
 
-As integrated circuits become more complex and costly to manufacture, it is crucial to incorporate testability features early in the design process. Design for Testability (DFT) techniques enhance fault coverage and reduce test time and cost by making internal signals easier to control and observe. One widely used DFT method is scan chain insertion, which links sequential elements into shift registers. This allows test vectors to be serially loaded, captured, and read back, enabling effective fault detection and diagnosis.
+As integrated circuits become more complex and costly to manufacture, it is crucial to
+incorporate testability features early in the design process. Design for Testability (DFT)
+techniques enhance fault coverage and reduce test time and cost by making internal signals
+easier to control and observe. One widely used DFT method is scan chain insertion, which
+links sequential elements into shift registers. This allows test vectors to be serially
+loaded, captured, and read back, enabling effective fault detection and diagnosis.
 
-Cadence Genus offers built-in support for various DFT flows. In this lab, you will use Genus to insert scan chains into a synthesized design, create the necessary test ports and control signals, and analyze the resulting reports to assess the impact on area, timing, and power.
+Fusion Compiler contains the TestMAX DFT engine, so scan insertion happens in the same
+tool you used for synthesis in Lab 1. In this lab, you will insert scan chains into a synthesized design, create the necessary test ports and control signals.  
 
 #### Step 1 – Synthesize the Design
 
-For this lab you will synthesize a synchronous FIFO with read/valid interface. You can find the System Verilog code in the SRC folder. 
+For this lab you will synthesize a synchronous FIFO with a ready/valid interface. The
+SystemVerilog is in `src/FIFO.sv`.
 
-DFT can be applied during synthesis or added to a synthesized netlist. Begin by synthesizing the RTL design with Genus. After successful synthesis, save the design for future use:
+DFT can be applied during synthesis or added to a synthesized netlist. This lab does the
+second, so start by synthesizing the RTL on its own:
 
+```bash
+fc_shell -f scripts/syn.tcl
 ```
-write_design -base_name ${_OUTPUTS_PATH}/DESIGN/${DESIGN}_synth
-```
-
-Ensure that `${_OUTPUTS_PATH}` and `${DESIGN}` are set correctly before executing this command.
 
 #### Step 2 – Insert Scan Chains
 
-Start the DFT flow in the current Genus session or reload the synthesized design. To reload, set the design name and source the setup file:
+Run the DFT flow. It reads the synthesised netlist back into a fresh library, so scan is
+added to a finished netlist rather than folded into synthesis:
 
-```
-set DESIGN FIFO
-source ./OUTPUTS/DESIGN/${DESIGN}_synth.genus_setup.tcl
-```
-
-Define the required variables:
-
-```
-set CLOCK_NAME clk
-set MAP_OPT_EFF high
-set _OUTPUTS_PATH OUTPUTS_DFT
-set _REPORTS_PATH REPORTS_DFT
+```bash
+fc_shell -f scripts/dft.tcl
 ```
 
-Configure the DFT scan style and create two control ports:
-- `scan_en`: Enables scan mode by selecting the scan input via the multiplexer.
-- `scan_testmode`: Forces the design into test mode, disabling or overriding parts of the circuit for testing.
+**The rest of this step is what that script does, in order.** Read it alongside
+`scripts/dft.tcl`.
 
-By default, the design clock (`${CLOCK_NAME}`) is used as the test clock, but you can specify a different test clock if needed.
+It configures the scan style and creates four test ports:
+- `scan_en`: enables scan mode by selecting the scan input at every register.
+- `scan_testmode`: forces the design into test mode. This design resets synchronously, has
+  an ungated clock and no tristate logic, so there is nothing to hold and the port stays
+  unconnected.
+- `scan_di` and `scan_do`: serial input and output of the chain.
 
-```
-# DFT Scan Chain Configuration for Genus
-set_db dft_scan_style muxed_scan
+```tcl
+set_dft_configuration -scan enable
+set_scan_configuration -style multiplexed_flip_flop -chain_count 1
 
-# Define DFT signals and ports
-define_dft shift_enable -active high -create_port scan_en
-define_dft test_mode -active high -create_port scan_testmode
+create_port scan_en       -direction in
+create_port scan_testmode -direction in
+create_port scan_di       -direction in
+create_port scan_do       -direction out
 
-# Define the test clock
-define_dft test_clock ${CLOCK_NAME}
-
-set_db dft_identify_test_signals false
-set_db dft_identify_top_level_test_clocks false
-set_compatible_test_clocks -all
-```
-
-Automatically fix DFT violations (such as asynchronous set/reset pins and gated clocks) and insert any required fix-up logic controlled by the `scan_testmode` signal:
-
-```
-check_dft_rules
-
-fix_dft_violations -clock -test_control scan_testmode -async_set -async_reset 
-
-report_scan_registers > ${_REPORTS_PATH}/scan_registers_report.rep
+set_dft_signal -view spec -type ScanEnable  -port scan_en       -active_state 1
+set_dft_signal -view spec -type TestMode    -port scan_testmode -active_state 1
+set_dft_signal -view spec -type ScanDataIn  -port scan_di
+set_dft_signal -view spec -type ScanDataOut -port scan_do
 ```
 
-Genus will add the necessary scan-related ports, replace standard flip-flops with scan-enabled versions (if available), connect all registers into scan chains, and re-synthesize the design to incorporate these changes:
+By default the design clock is used as the test clock. `-view existing_dft` says the port
+is already in the design rather than something to create:
 
-```
-define_dft scan_chain -create_ports -sdi scan_di -sdo scan_do -shift_enable scan_en -domain clk -edge rise
-
-# Replace non-scan flops with scan-equivalent flip-flops if previously mapped
-convert_to_scan 
-
-# Connect scan chains
-connect_scan_chains -auto_create_chains
-
-set_db syn_opt_effort ${MAP_OPT_EFF}
-syn_opt -incremental
-
-report_scan_chains > ${_REPORTS_PATH}/${DESIGN}_scan_chains_report.rep
-report_scan_setup > ${_REPORTS_PATH}/${DESIGN}_scan_setup_report.rep
+```tcl
+set_dft_signal -view existing_dft -type ScanClock -port clk -timing {45 55}
 ```
 
-The `convert_to_scan` command reports the percentage of registers available for DFT:
+It then builds the shift and capture procedure, and checks every register can be reached
+through it:
 
-```
-Scan mapping status report
-==========================
-    Scan mapping: converting flip-flops that pass TDRC.
-      Scan connection mode: 'loopback'.
-      Scan shift-enable connection mode: 'tie_off'.
-    Scan mapping done: 22 flip-flops mapped to scan.
-    Category                               Number    Percentage
-    -----------------------------------------------------------
-    Scan flip-flops mapped for DFT            22        100.00%
-    Flip-flops not mapped for DFT
-         flip-flops not scan replaceable       0          0.00%
-         flip-flops not targeted for DFT       0          0.00%
-    -----------------------------------------------------------
-                                  Totals      22        100.00%
+```tcl
+create_test_protocol
+dft_drc
 ```
 
-If the percentage of scan flip-flops mapped for DFT is lower than expected, review the unmapped registers and investigate the reasons for incomplete coverage. Addressing these issues will help maximize fault coverage and improve your test strategy.
+The chain is previewed before it is committed to:
 
-Export the updated design using the following commands:
+```tcl
+preview_dft
+insert_dft
+```
+
+`preview_dft` reports the chain without modifying the design:
 
 ```
-write_snapshot -directory ${_REPORTS_PATH}/final -tag final
-report_summary -directory ${_REPORTS_PATH}
+Number of chains: 1
 
-write_hdl > ${_OUTPUTS_PATH}/${DESIGN}_synth.v
-write_sdc > ${_OUTPUTS_PATH}/${DESIGN}_synth.sdc
-write_sdf > ${_OUTPUTS_PATH}/${DESIGN}_synth.sdf
-write_script > ${_OUTPUTS_PATH}/${DESIGN}_synth.script
-    
-write_design -base_name ${_OUTPUTS_PATH}/DESIGN/${DESIGN}_synth
-write_db -all_root_attributes -script ${_OUTPUTS_PATH}/DESIGN/${DESIGN}_synth.tcl    
+Scan chain '1' (scan_di --> scan_do) contains 525 cells:
 
-report_qor > ${_REPORTS_PATH}/${DESIGN}_qor.rpt
-report_area > ${_REPORTS_PATH}/${DESIGN}_area.rpt
-report_dp > ${_REPORTS_PATH}/${DESIGN}_datapath_incr.rpt
-report_messages > ${_REPORTS_PATH}/${DESIGN}_messages.rpt
-report_gates > ${_REPORTS_PATH}/${DESIGN}_gates.rpt
-report_timing > ${_REPORTS_PATH}/${DESIGN}_timing.rpt
-report_power > ${_REPORTS_PATH}/${DESIGN}_power.rpt
+  count_reg[0]              (clk, 45, rising)
+  count_reg[1]
+  ...
 ```
+
+Finally the rule check is re-run now the chain exists, and the results exported:
+
+```tcl
+dft_drc
+
+write_verilog outputs/FIFO_dft.v
+write_sdc -output outputs/FIFO_dft.sdc
+write_test_protocol -test_mode Internal_scan -output outputs/FIFO_dft.spf
+```
+
+When the script finishes, compare `reports/dft_drc_pre.rpt` with
+`reports/dft_drc_post.rpt`, and read `reports/dft_preview.rpt`.
+
 
 #### Step 3 – Inspect and Compare Results
 
-Review the generated reports and output files.  
-Open the updated Verilog design and examine the module’s input and output ports.  
-> Can you identify the new ports added by the DFT flow? During simulation, ensure these ports are defined in your DUT to avoid simulation errors.
+Open `outputs/FIFO_dft.v` and look at the module's port list.
 
-Explore the reports in the `REPORTS_DFT` directory.
+> Can you identify the new ports added by the DFT flow? During simulation, ensure these
+> ports are driven in your testbench to avoid simulation errors.
 
-The `scan_registers_report.rep` file details which registers have passed or failed the DFT rules and provides a summary.  
-Other reports, such as area, power, and timing, should be familiar.
+Then compare the two report sets:
 
-> Compare the area, power, and timing metrics before and after scan chain insertion. What differences do you observe? Can you explain the reasons for these changes?
-
-#### Step 4 – Write the ATPG
-
-Genus can automatically generate an ATPG script for Modus to create test vectors for your design. This script configures the test environment, specifies the scan mode, and sets ATPG options. Once generated, you can run it in Modus to produce the necessary test patterns for verifying scan chain functionality.
-
-```
-write_dft_atpg  -directory ./ATPG \
-                -library "/usr/local/cadence/kits/tsmc/beLibs/65nm/TSMCHOME/digital/Front_End/verilog/tcbn65lpbwp7t_141a/tcbn65lpbwp7t.v" \
-                -build_testmode_options "-testmode FULLSCAN" \
-                -atpg_options "-reportheartbeat 5 -maxelapsedtime 10" \
+```bash
+diff reports/synth_area.rpt reports/dft_area.rpt
+diff reports/synth_qor.rpt  reports/dft_qor.rpt
 ```
 
-<!-- Exit Genus and run the generated script in Modus:
+#### Step 4 – Generate Test Patterns
+
+`scripts/dft.tcl` wrote `outputs/FIFO_dft.spf`, a STIL protocol file describing how to
+shift and capture:
+
+```tcl
+write_test_protocol -test_mode Internal_scan -output outputs/FIFO_dft.spf
+```
+
+TestMAX ATPG reads the protocol along with the netlist:
+
+```bash
+tmax -shell -nostartup scripts/atpg.tcl
+```
+
+The script builds the model, runs DRC against the protocol, adds a stuck-at fault list,
+and generates patterns. It leaves you at a `TEST>` prompt with the fault list still
+loaded, so you can explore:
 
 ```
-modus -file ./ATPG/runmodus.atpg.tcl
+report_summaries
 ```
 
-This process generates a Verilog testbench that can be used by Automatic Test Equipment (ATE) to control the DUT ports, shift in test vectors, and capture the serial output during scan testing.
+#### Step 5 – Simulate the Patterns
 
-To simulate scan chain operation, run the provided script at `./ATPG/run_fullscan_sim`. -->
+Generating patterns is not the same as knowing they work. To check them you need a
+testbench, and getting one takes an extra step.
+
+`write_patterns` in TestMAX writes tester formats only - STIL, WGL, TDL and so on. The supported verilog route is the
+*unified STIL flow*: write the patterns once as STIL, then translate them.
+
+```bash
+make patterns
+```
+
+which runs:
+
+```bash
+stil2verilog outputs/FIFO_patterns.stil outputs/FIFO_patterns \
+    -v_file outputs/FIFO_dft.v \
+    -v_lib $SYN_SIM_MODELS \
+    -serial -sim_script vcs
+```
+
+Then simulate:
+
+```bash
+make sim-atpg
+```
+
+A passing run reports no mismatches.
 
 ---
 
 ### Task 2 – Logic Equivalence Check (LEC)
 
-Logic Equivalence Check (LEC) is a vital verification step to ensure functional correctness after design transformations such as scan chain insertion or optimization. By comparing the original RTL with the modified netlist, LEC confirms that no unintended changes have been introduced, guaranteeing that the synthesized design remains functionally identical to the source.
+Logic Equivalence Check (LEC) is a vital verification step to ensure functional
+correctness after design transformations such as scan chain insertion or optimization. By
+comparing the original RTL with the modified netlist, LEC confirms that no unintended
+changes have been introduced, guaranteeing that the synthesized design remains
+functionally identical to the source.
 
-This can be performed using Cadence Conformal as follows:
+The Synopsys tool for this is Formality:
 
-Start Genus and reload the post-DFT design:
-
-```
-source ./OUTPUTS_DFT/DESIGN/${DESIGN}_synth.genus_setup.tcl
-```
-
-Genus can automatically generate a script for Logic Equivalence Check (LEC):
-
-```
-write_do_lec -revised_design <path to the synthesized file> -logfile ${_OUTPUTS_PATH}/rtl2final.lec.log > ${_OUTPUTS_PATH}/rtl2final.lec.do
+```bash
+fm_shell -f scripts/lec.tcl
 ```
 
-Close Genus and run the generated LEC script in Conformal:
+The script compares `src/FIFO.sv` against `outputs/FIFO_dft.v` - the original RTL against
+the netlist after both synthesis and scan insertion.
+
+If the designs are equivalent, the tool reports:
 
 ```
-lec -xl -nogui -dofile ./<path of do file>/<name of do file>.do
+********************************* Verification Results *********************************
+Verification SUCCEEDED
+----------------------
+ Reference design: r:/WORK/FIFO
+ Implementation design: i:/WORK/FIFO
+ 559 Passing compare points
+----------------------------------------------------------------------------------------
+Matched Compare Points     BBPin    Loop   BBNet     Cut    Port     DFF     LAT   TOTAL
+----------------------------------------------------------------------------------------
+Passing (equivalent)           0       0       0       0      34     525       0     559
+Failing (not equivalent)       0       0       0       0       0       0       0       0
+****************************************************************************************
 ```
 
-If the designs are functionally equivalent, the tool will report "PASS":
-
-```
---------------------------------------------------------------------------------
-6. Compare Results:                                                        PASS
-     Number of EQ compare points:                              60
-     Number of NON-EQ compare points:                          0
-     Number of Aborted compare points:                         0
-     Number of Uncompared compare points :                     0
-================================================================================
-```
-
-> Now, introduce an error in the structural Verilog netlist and repeat the LEC. You will observe that the check does not pass.
-
-
-
-
+>Now, introduce an error in the structural Verilog netlist and repeat the LEC. You will observe that the check does not pass.
